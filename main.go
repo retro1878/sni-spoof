@@ -386,6 +386,15 @@ func handle(client net.Conn) {
 	}
 	defer server.Close()
 
+	// Disable Nagle on both ends so small writes aren't delayed. (Go already
+	// defaults TCP connections to NoDelay; set it explicitly to be sure.)
+	if tc, ok := client.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
+	if tc, ok := server.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
+
 	port := uint16(server.LocalAddr().(*net.TCPAddr).Port)
 	defer ports.Delete(port)
 
