@@ -26,6 +26,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,6 +86,74 @@ func be16(b []byte, v uint16) []byte {
 	return append(b, x[:]...)
 }
 
+// ---- Leveled logging ----
+//
+// Minimal wrapper around the standard log package (no new dependencies).
+// Levels are ordered error < warn < info < debug; a message fires only when
+// its level is <= the configured threshold. The threshold defaults to "warn"
+// when LOG_LEVEL is absent or empty.
+//
+// The logXxxf helpers early-return before any Sprintf, so disabled hot-path
+// debug calls do no string formatting.
+
+type logLevel int
+
+const (
+	levelError logLevel = iota
+	levelWarn
+	levelInfo
+	levelDebug
+)
+
+var logThreshold = levelWarn
+
+func parseLevel(s string) logLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "error":
+		return levelError
+	case "warn", "warning":
+		return levelWarn
+	case "info":
+		return levelInfo
+	case "debug":
+		return levelDebug
+	default:
+		return levelWarn
+	}
+}
+
+func logEnabled(l logLevel) bool { return l <= logThreshold }
+
+func logErrorf(format string, v ...any) {
+	if logEnabled(levelError) {
+		log.Printf("[error] "+format, v...)
+	}
+}
+
+func logWarnf(format string, v ...any) {
+	if logEnabled(levelWarn) {
+		log.Printf("[warn] "+format, v...)
+	}
+}
+
+func logInfof(format string, v ...any) {
+	if logEnabled(levelInfo) {
+		log.Printf("[info] "+format, v...)
+	}
+}
+
+func logDebugf(format string, v ...any) {
+	if logEnabled(levelDebug) {
+		log.Printf("[debug] "+format, v...)
+	}
+}
+
+// logFatalf always reports (error is the highest level) and then exits 1,
+// preserving the behavior of the log.Fatal* calls it replaces.
+func logFatalf(format string, v ...any) {
+	log.Fatalf("[error] "+format, v...)
+}
+
 // ---- Config ----
 
 type Config struct {
@@ -93,6 +162,7 @@ type Config struct {
 	ConnectIP   string `json:"CONNECT_IP"`
 	ConnectPort int    `json:"CONNECT_PORT"`
 	FakeSNI     string `json:"FAKE_SNI"`
+	LogLevel    string `json:"LOG_LEVEL"`
 }
 
 var (
@@ -189,7 +259,7 @@ func sniffLoop() {
 	for {
 		n, err := recvFrame(buf)
 		if err != nil {
-			log.Println("recv:", err)
+			logDebugf("recv: %v", err)
 			continue
 		}
 		if n < 14+20+20 {
@@ -234,13 +304,13 @@ func sniffLoop() {
 					done:   make(chan struct{}),
 				}
 				ports.Store(srcPort, ps)
-				log.Printf("[sniff] OUT SYN  port=%d isn=%d flags=0x%02x", srcPort, seq, flags)
+				logDebugf("[sniff] OUT SYN  port=%d isn=%d flags=0x%02x", srcPort, seq, flags)
 				continue
 			}
 
 			// 3rd-handshake ACK: ACK only, no payload.
 			if flags&ACK != 0 && flags&(SYN|FIN|RST) == 0 && plen == 0 {
-				log.Printf("[sniff] OUT ACK  port=%d seq=%d flags=0x%02x plen=0", srcPort, seq, flags)
+				logDebugf("[sniff] OUT ACK  port=%d seq=%d flags=0x%02x plen=0", srcPort, seq, flags)
 				v, ok := ports.Load(srcPort)
 				if !ok {
 					continue
@@ -263,9 +333,9 @@ func sniffLoop() {
 					time.Sleep(1 * time.Millisecond)
 					frame := buildFakeFrame(tplCopy, synSeq, fake)
 					if err := sendFrame(frame); err != nil {
-						log.Printf("port=%d inject err: %v", srcPort, err)
+						logDebugf("port=%d inject err: %v", srcPort, err)
 					} else {
-						log.Printf("port=%d: injected fake ClientHello sni=%s seq=%d (ISN=%d)",
+						logDebugf("port=%d: injected fake ClientHello sni=%s seq=%d (ISN=%d)",
 							srcPort, cfg.FakeSNI, synSeq+1-uint32(len(fake)), synSeq)
 					}
 				}()
@@ -275,7 +345,7 @@ func sniffLoop() {
 		if inbound {
 			dstPort := binary.BigEndian.Uint16(tcp[2:4])
 			ackNum := binary.BigEndian.Uint32(tcp[8:12])
-			log.Printf("[sniff] IN       port=%d ack=%d flags=0x%02x plen=%d", dstPort, ackNum, flags, plen)
+			logDebugf("[sniff] IN       port=%d ack=%d flags=0x%02x plen=%d", dstPort, ackNum, flags, plen)
 			// After fake sent: server's ACK with ack==syn_seq+1 proves the
 			// fake was ignored (server is still at the real expected seq).
 			if flags&ACK != 0 && flags&(SYN|FIN|RST) == 0 && plen == 0 {
@@ -290,10 +360,10 @@ func sniffLoop() {
 					case <-ps.done:
 					default:
 						close(ps.done)
-						log.Printf("[sniff] port=%d: CONFIRMED server acked isn+1=%d (fake ignored)", dstPort, ps.synSeq+1)
+						logDebugf("[sniff] port=%d: CONFIRMED server acked isn+1=%d (fake ignored)", dstPort, ps.synSeq+1)
 					}
 				} else if ps.fakeSent {
-					log.Printf("[sniff] port=%d: post-fake ACK ack=%d != isn+1=%d", dstPort, ackNum, ps.synSeq+1)
+					logDebugf("[sniff] port=%d: post-fake ACK ack=%d != isn+1=%d", dstPort, ackNum, ps.synSeq+1)
 				}
 				ps.mu.Unlock()
 			}
@@ -311,7 +381,7 @@ func handle(client net.Conn) {
 	}
 	server, err := d.Dial("tcp", fmt.Sprintf("%s:%d", cfg.ConnectIP, cfg.ConnectPort))
 	if err != nil {
-		log.Println("dial:", err)
+		logDebugf("dial: %v", err)
 		return
 	}
 	defer server.Close()
@@ -330,7 +400,7 @@ func handle(client net.Conn) {
 		time.Sleep(1 * time.Millisecond)
 	}
 	if ps == nil {
-		log.Printf("port=%d: sniffer never registered this connection; aborting", port)
+		logDebugf("port=%d: sniffer never registered this connection; aborting", port)
 		return
 	}
 
@@ -340,11 +410,11 @@ func handle(client net.Conn) {
 	select {
 	case <-ps.done:
 	case <-time.After(2 * time.Second):
-		log.Printf("port=%d: timeout waiting for server ACK of ISN+1; aborting", port)
+		logDebugf("port=%d: timeout waiting for server ACK of ISN+1; aborting", port)
 		return
 	}
 
-	log.Printf("port=%d: fake confirmed, starting relay", port)
+	logDebugf("port=%d: fake confirmed, starting relay", port)
 
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(server, client); done <- struct{}{} }()
@@ -357,7 +427,7 @@ func handle(client net.Conn) {
 func getLocalIPAndIface(targetIP string) (net.IP, string, int) {
 	c, err := net.Dial("udp", targetIP+":53")
 	if err != nil {
-		log.Fatal(err)
+		logFatalf("%v", err)
 	}
 	defer c.Close()
 	lip := c.LocalAddr().(*net.UDPAddr).IP.To4()
@@ -371,7 +441,7 @@ func getLocalIPAndIface(targetIP string) (net.IP, string, int) {
 			}
 		}
 	}
-	log.Fatalf("no interface for local IP %s", lip)
+	logFatalf("no interface for local IP %s", lip)
 	return nil, "", 0
 }
 
@@ -382,22 +452,23 @@ func main() {
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatal(err)
+		logFatalf("%v", err)
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		log.Fatal(err)
+		logFatalf("%v", err)
 	}
+	logThreshold = parseLevel(cfg.LogLevel)
 	connectIP = net.ParseIP(cfg.ConnectIP).To4()
 	if connectIP == nil {
-		log.Fatalf("bad CONNECT_IP: %s", cfg.ConnectIP)
+		logFatalf("bad CONNECT_IP: %s", cfg.ConnectIP)
 	}
 	localIP, ifaceName, ifaceIdx = getLocalIPAndIface(cfg.ConnectIP)
 
 	if err := openRaw(); err != nil {
-		log.Fatal("open raw socket: ", err)
+		logFatalf("open raw socket: %v", err)
 	}
 
-	log.Printf("iface=%s ifindex=%d local=%s remote=%s:%d listen=%s:%d fake_sni=%s",
+	logInfof("iface=%s ifindex=%d local=%s remote=%s:%d listen=%s:%d fake_sni=%s",
 		ifaceName, ifaceIdx, localIP, cfg.ConnectIP, cfg.ConnectPort,
 		cfg.ListenHost, cfg.ListenPort, cfg.FakeSNI)
 
@@ -405,12 +476,13 @@ func main() {
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", cfg.ListenHost, cfg.ListenPort))
 	if err != nil {
-		log.Fatal(err)
+		logFatalf("%v", err)
 	}
+	logInfof("listening on %s:%d", cfg.ListenHost, cfg.ListenPort)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			log.Println("accept:", err)
+			logDebugf("accept: %v", err)
 			continue
 		}
 		go handle(c)
