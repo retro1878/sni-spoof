@@ -37,7 +37,7 @@ LOG_LEVEL="info"
 # the sni-spoof-linux-amd64 committed in this repo. If you rebuild/republish
 # the binary, update this (sha256sum sni-spoof-linux-amd64) or set it empty to
 # disable verification (NOT recommended; see the warning it prints).
-EXPECTED_SHA256="4c6236118bbbc818946e92579ff3ee0676813c8f6fdfd0adec3f9d30653d5ccd"
+EXPECTED_SHA256="343f62a490a640da250b0a4df07f8fd86ce58073e0de9b82fd6c02edeaeb98b3"
 
 # ── Must run as root ────────────────────────────────────────
 if [[ ${EUID} -ne 0 ]]; then

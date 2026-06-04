@@ -1,12 +1,15 @@
 //go:build linux
 
-// Linux raw-socket backend: AF_PACKET SOCK_RAW bound to the egress interface.
+// Linux raw-socket backend: AF_PACKET SOCK_RAW bound to the egress interface,
+// reading captured frames from an mmap'd TPACKET_V2 RX ring (PACKET_RX_RING).
 // Requires CAP_NET_RAW (run as root).
 
 package main
 
 import (
 	"encoding/binary"
+	"sync/atomic"
+	"unsafe"
 
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
@@ -14,11 +17,23 @@ import (
 
 func htons(v uint16) uint16 { return (v<<8)&0xff00 | v>>8 }
 
-// captureBufBytes is the SO_RCVBUF we request for the AF_PACKET socket. A few
-// MiB absorbs short bursts so we don't drop the handshake/confirmation control
-// packets the sniffer depends on. The kernel silently caps this at
-// net.core.rmem_max, so the effective value may be lower.
-const captureBufBytes = 4 * 1024 * 1024
+// RX-ring geometry. The kernel requires block_size to be a multiple of the page
+// size and of frame_size, frame_size to be a multiple of TPACKET_ALIGNMENT, and
+// frame_nr == (block_size/frame_size)*block_nr. Captured frames here are only
+// the small control packets the BPF filter lets through (SYN / pure ACK), so a
+// 2 KiB frame is ample; the total ring is 512 KiB and replaces both the old
+// per-packet recvfrom path and the SO_RCVBUF socket buffer as where frames land.
+const (
+	tpFrameSize = 2048
+	tpBlockSize = 1 << 15 // 32 KiB (8 pages)
+	tpBlockNr   = 16
+	tpFrameNr   = (tpBlockSize / tpFrameSize) * tpBlockNr // 256 frames
+)
+
+var (
+	rxRing []byte // mmap'd ring shared with the kernel
+	rxIdx  int    // next frame slot to inspect (frames are consumed in order)
+)
 
 // sniffFilter builds a classic-BPF program that the kernel applies to the
 // AF_PACKET socket so only the packets sniffLoop actually acts on reach
@@ -80,8 +95,14 @@ func openRaw() error {
 		return err
 	}
 
-	// Attach the kernel-side filter before binding so data frames are dropped
-	// in the kernel and never reach the single sniffLoop goroutine.
+	// TPACKET_V2 must be selected before the ring is requested.
+	if err := unix.SetsockoptInt(fd, unix.SOL_PACKET, unix.PACKET_VERSION, unix.TPACKET_V2); err != nil {
+		unix.Close(fd)
+		return err
+	}
+
+	// Attach the kernel-side filter before the ring exists so filtered-out
+	// frames never consume a ring slot or reach the single sniffLoop goroutine.
 	filter, err := sniffFilter(connectIP)
 	if err != nil {
 		unix.Close(fd)
@@ -93,27 +114,79 @@ func openRaw() error {
 		return err
 	}
 
-	// Grow the receive buffer so bursts don't drop the control packets.
-	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, captureBufBytes)
+	// Request the mmap'd RX ring (kernel writes captured frames here directly).
+	req := &unix.TpacketReq{
+		Block_size: tpBlockSize,
+		Block_nr:   tpBlockNr,
+		Frame_size: tpFrameSize,
+		Frame_nr:   tpFrameNr,
+	}
+	if err := unix.SetsockoptTpacketReq(fd, unix.SOL_PACKET, unix.PACKET_RX_RING, req); err != nil {
+		unix.Close(fd)
+		return err
+	}
+
+	ring, err := unix.Mmap(fd, 0, tpBlockSize*tpBlockNr,
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		unix.Close(fd)
+		return err
+	}
 
 	if err := unix.Bind(fd, &unix.SockaddrLinklayer{
 		Protocol: htons(unix.ETH_P_ALL),
 		Ifindex:  ifaceIdx,
 	}); err != nil {
+		_ = unix.Munmap(ring)
 		unix.Close(fd)
 		return err
 	}
+
 	rawFd = fd
+	rxRing = ring
+	rxIdx = 0
 	return nil
 }
 
+// recvFrame returns the next captured Ethernet frame, copied into buf. It walks
+// the RX ring in order: each slot's status flips to TP_STATUS_USER when the
+// kernel has filled it, and we flip it back to TP_STATUS_KERNEL once consumed.
+// When the next slot isn't ready it blocks in poll() until the kernel fills it,
+// so a burst of control packets is drained with one wakeup instead of one
+// recvfrom syscall per packet.
 func recvFrame(buf []byte) (int, error) {
 	for {
-		n, _, err := unix.Recvfrom(rawFd, buf, 0)
-		if err == unix.EINTR {
+		off := rxIdx * tpFrameSize
+		hdr := (*unix.Tpacket2Hdr)(unsafe.Pointer(&rxRing[off]))
+
+		if atomic.LoadUint32(&hdr.Status)&unix.TP_STATUS_USER == 0 {
+			pfd := []unix.PollFd{{Fd: int32(rawFd), Events: unix.POLLIN | unix.POLLERR}}
+			if _, err := unix.Poll(pfd, -1); err != nil {
+				if err == unix.EINTR {
+					continue
+				}
+				return 0, err
+			}
 			continue
 		}
-		return n, err
+
+		if atomic.LoadUint32(&hdr.Status)&unix.TP_STATUS_LOSING != 0 {
+			logDebugf("[sniff] RX ring reports drops (TP_STATUS_LOSING)")
+		}
+
+		n := int(hdr.Len)
+		macOff := off + int(hdr.Mac)
+		copied := copy(buf, rxRing[macOff:macOff+n])
+
+		// Hand the slot back to the kernel. The store-release pairs with the
+		// kernel's barrier before it set TP_STATUS_USER on this slot.
+		atomic.StoreUint32(&hdr.Status, unix.TP_STATUS_KERNEL)
+
+		rxIdx++
+		if rxIdx >= tpFrameNr {
+			rxIdx = 0
+		}
+		return copied, nil
 	}
 }
 
