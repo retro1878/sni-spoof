@@ -259,7 +259,7 @@ func sniffLoop() {
 	for {
 		n, err := recvFrame(buf)
 		if err != nil {
-			logDebugf("recv: %v", err)
+			logErrorf("recv: %v", err)
 			continue
 		}
 		if n < 14+20+20 {
@@ -304,7 +304,7 @@ func sniffLoop() {
 					done:   make(chan struct{}),
 				}
 				ports.Store(srcPort, ps)
-				logDebugf("[sniff] OUT SYN  port=%d isn=%d flags=0x%02x", srcPort, seq, flags)
+				logInfof("[sniff] OUT SYN  port=%d isn=%d flags=0x%02x", srcPort, seq, flags)
 				continue
 			}
 
@@ -333,9 +333,9 @@ func sniffLoop() {
 					time.Sleep(1 * time.Millisecond)
 					frame := buildFakeFrame(tplCopy, synSeq, fake)
 					if err := sendFrame(frame); err != nil {
-						logDebugf("port=%d inject err: %v", srcPort, err)
+						logErrorf("port=%d inject err: %v", srcPort, err)
 					} else {
-						logDebugf("port=%d: injected fake ClientHello sni=%s seq=%d (ISN=%d)",
+						logInfof("port=%d: injected fake ClientHello sni=%s seq=%d (ISN=%d)",
 							srcPort, cfg.FakeSNI, synSeq+1-uint32(len(fake)), synSeq)
 					}
 				}()
@@ -360,7 +360,7 @@ func sniffLoop() {
 					case <-ps.done:
 					default:
 						close(ps.done)
-						logDebugf("[sniff] port=%d: CONFIRMED server acked isn+1=%d (fake ignored)", dstPort, ps.synSeq+1)
+						logInfof("[sniff] port=%d: CONFIRMED server acked isn+1=%d (fake ignored)", dstPort, ps.synSeq+1)
 					}
 				} else if ps.fakeSent {
 					logDebugf("[sniff] port=%d: post-fake ACK ack=%d != isn+1=%d", dstPort, ackNum, ps.synSeq+1)
@@ -381,7 +381,7 @@ func handle(client net.Conn) {
 	}
 	server, err := d.Dial("tcp", fmt.Sprintf("%s:%d", cfg.ConnectIP, cfg.ConnectPort))
 	if err != nil {
-		logDebugf("dial: %v", err)
+		logErrorf("dial: %v", err)
 		return
 	}
 	defer server.Close()
@@ -409,7 +409,7 @@ func handle(client net.Conn) {
 		time.Sleep(1 * time.Millisecond)
 	}
 	if ps == nil {
-		logDebugf("port=%d: sniffer never registered this connection; aborting", port)
+		logWarnf("port=%d: sniffer never registered this connection; aborting", port)
 		return
 	}
 
@@ -419,11 +419,11 @@ func handle(client net.Conn) {
 	select {
 	case <-ps.done:
 	case <-time.After(2 * time.Second):
-		logDebugf("port=%d: timeout waiting for server ACK of ISN+1; aborting", port)
+		logWarnf("port=%d: timeout waiting for server ACK of ISN+1; aborting", port)
 		return
 	}
 
-	logDebugf("port=%d: fake confirmed, starting relay", port)
+	logInfof("port=%d: fake confirmed, starting relay", port)
 
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(server, client); done <- struct{}{} }()
@@ -491,7 +491,7 @@ func main() {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			logDebugf("accept: %v", err)
+			logWarnf("accept: %v", err)
 			continue
 		}
 		go handle(c)

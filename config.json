@@ -4,5 +4,5 @@
   "CONNECT_IP": "104.18.4.130",
   "CONNECT_PORT": 443,
   "FAKE_SNI": "security.vercel.com",
-  "LOG_LEVEL": "warn"
+  "LOG_LEVEL": "info"
 }
