@@ -14,6 +14,23 @@ A local TCP forwarder that tricks stateful DPI into whitelisting the flow before
 4. The sniffer waits for the server's reply ACK with `ack == ISN + 1`, which proves the server ignored the fake and is still expecting the real byte stream. Only then does the forwarder start relaying real client↔server data. The real ClientHello is now invisible to DPI.
 5. If that confirmation doesn't arrive within 2s, the connection is aborted.
 
+## Release
+
+Releases are published with `scripts/release.sh`, not by CI: this repo is a
+fork, and GitHub Actions stays disabled on forks, so tag pushes build nothing.
+
+```
+scripts/release.sh v0.6.0
+```
+
+It cross-compiles the four platforms, updates the installer's pinned SHA-256 to
+match the artifact being published, tags, pushes, publishes the release, then
+re-downloads every asset and verifies it against the pin.
+
+Binaries are built with `-buildvcs=false` so the checksum is reproducible for a
+given Go toolchain. Changing the Go version changes the output bytes, so
+rebuild and re-pin with the same script rather than by hand.
+
 ## Build / run
 
 ```
