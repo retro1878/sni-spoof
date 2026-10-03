@@ -1,0 +1,7 @@
+# Keep shell scripts and workflow YAML LF-only. setup.sh runs as a bash script
+# on Linux; a CRLF shebang makes the kernel refuse to execute it.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.go text eol=lf
+*.json text eol=lf
