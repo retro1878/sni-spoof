@@ -17,7 +17,7 @@ A local TCP forwarder that tricks stateful DPI into whitelisting the flow before
 ## Build / run
 
 ```
-go build -o sni-spoof .
+go build -buildvcs=false -o sni-spoof .
 sudo ./sni-spoof config.json
 ```
 
