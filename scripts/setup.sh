@@ -34,13 +34,17 @@ JOURNAL_CAP="200M"     # fallback: cap the journal if we can't use a file
 LOG_LEVEL="info"
 
 # Integrity check. Expected SHA-256 of the binary served by DL_URL. Pinned to
-# the sni-spoof-linux-amd64 committed in this repo, which is built with
-# -buildvcs=false so the hash is reproducible: rebuilding the same source
-# yields the same bytes and this pin stays valid. Without that flag Go embeds
-# the git revision and the hash changes on every commit. If you do change the
-# source, update this (sha256sum sni-spoof-linux-amd64) or set it empty to
+# the sni-spoof-linux-amd64 committed in this repo. It is built with
+# -buildvcs=false and -B gobuildid so the hash is reproducible across
+# machines: without the former Go embeds the git revision, and without the
+# latter the build id encodes the build directory, so the same source
+# yields different bytes elsewhere. Both flags are in the release
+# workflow, which is the only publisher. If you change the source, rebuild
+# with those flags and update this (sha256sum sni-spoof-linux-amd64), or set
+# it empty to disable verification (NOT recommended; see the warning it
+# prints).
 # disable verification (NOT recommended; see the warning it prints).
-EXPECTED_SHA256="65796edd013f1790f11b0453b46e82e909ca1e9f84df7763574e099780d58e22"
+EXPECTED_SHA256="699fb277a75f71bb2e6d318970339a50ec5fa7f96a679d79e23ca36a5800d292"
 
 # ── Must run as root ────────────────────────────────────────
 if [[ ${EUID} -ne 0 ]]; then

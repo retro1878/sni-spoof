@@ -42,7 +42,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
-          go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/sni-spoof-${{ matrix.goos }}-${{ matrix.goarch }} .
+          go build -buildvcs=false -trimpath -ldflags="-s -w -B gobuildid" -o dist/sni-spoof-${{ matrix.goos }}-${{ matrix.goarch }} .
       - uses: actions/upload-artifact@v4
         with:
           name: sni-spoof-${{ matrix.goos }}-${{ matrix.goarch }}
