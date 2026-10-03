@@ -43,7 +43,6 @@ LOG_LEVEL="info"
 # with those flags and update this (sha256sum sni-spoof-linux-amd64), or set
 # it empty to disable verification (NOT recommended; see the warning it
 # prints).
-# disable verification (NOT recommended; see the warning it prints).
 EXPECTED_SHA256="699fb277a75f71bb2e6d318970339a50ec5fa7f96a679d79e23ca36a5800d292"
 
 # ── Must run as root ────────────────────────────────────────
