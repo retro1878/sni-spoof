@@ -14,7 +14,7 @@ err()  { echo -e "${RED}[!]${NC} $1" >&2; exit 1; }
 # ── Settings you may want to edit ───────────────────────────
 # When you cut a new release, update DL_URL's tag and EXPECTED_SHA256
 # together; scripts/release.sh does this for you.
-DL_URL="https://github.com/retro1878/sni-spoof/releases/download/v0.5.0/sni-spoof-linux-amd64"
+DL_URL="https://github.com/retro1878/sni-spoof/releases/download/v0.6.0/sni-spoof-linux-amd64"
 BIN_PATH="/usr/local/bin/sni-spoof"
 CFG_DIR="/etc/sni-spoof"
 CFG_PATH="${CFG_DIR}/config.json"
@@ -45,7 +45,7 @@ LOG_LEVEL="info"
 # with those flags and update this (sha256sum sni-spoof-linux-amd64), or set
 # it empty to disable verification (NOT recommended; see the warning it
 # prints).
-EXPECTED_SHA256="7437850d4bb1aca8c784b1afd4fc60d64d2033205d43d7d3981730de70fff05c"
+EXPECTED_SHA256="b3415a7148ac38b974487434ac6c70862290c33d72171bbc6bb9cd1fbd5d8db5"
 
 # ── Must run as root ────────────────────────────────────────
 if [[ ${EUID} -ne 0 ]]; then
