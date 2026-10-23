@@ -36,13 +36,14 @@ fi
 # bytes, while CI builds from a checkout that excludes it.
 echo "==> building from a clean export of HEAD ($(go version | awk '{print $3}'))"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-git archive HEAD | tar -x -C "$TMP"
-( cd "$TMP" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+mkdir -p "$TMP/export"
+git archive HEAD | tar -x -C "$TMP/export"
+( cd "$TMP/export" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -buildvcs=false -trimpath -ldflags="-s -w -B gobuildid" \
     -o sni-spoof-linux-amd64 . )
 
-SHA_AMD64="$($SHA "$TMP/sni-spoof-linux-amd64" | awk '{print $1}')"
-cp "$TMP/sni-spoof-linux-amd64" sni-spoof-linux-amd64
+SHA_AMD64="$($SHA "$TMP/export/sni-spoof-linux-amd64" | awk '{print $1}')"
+cp "$TMP/export/sni-spoof-linux-amd64" sni-spoof-linux-amd64
 
 echo "==> pointing the installer at $VERSION and pinning $SHA_AMD64"
 sed -i.bak -E "s#^(DL_URL=\"https://github.com/[^\"]*/releases/download/)[^/]+/#\1$VERSION/#" scripts/setup.sh
