@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"unsafe"
@@ -51,9 +52,15 @@ var (
 //
 // Offsets are into the full Ethernet frame (14-byte L2 header included).
 func sniffFilter(connIP net.IP, v6 bool) ([]unix.SockFilter, error) {
-	insns := sniffFilterInsns(binary.BigEndian.Uint32(connIP.To4()))
+	var insns []bpf.Instruction
 	if v6 {
 		insns = sniffFilterInsns6()
+	} else {
+		ip4 := connIP.To4()
+		if ip4 == nil {
+			return nil, fmt.Errorf("sniffFilter: %s is not IPv4", connIP)
+		}
+		insns = sniffFilterInsns(binary.BigEndian.Uint32(ip4))
 	}
 	raw, err := bpf.Assemble(insns)
 	if err != nil {

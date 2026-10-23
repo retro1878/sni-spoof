@@ -157,3 +157,22 @@ func TestTCPChecksum6KnownVector(t *testing.T) {
 		t.Fatalf("tcpChecksum6 = 0x%04x, want 0x%04x", got, want)
 	}
 }
+
+// Tests the dispatch, not just the instruction lists: sniffFilter used to
+// call connIP.To4() unconditionally, which panics on an IPv6 address.
+func TestSniffFilterDispatchesOnFamily(t *testing.T) {
+	v4 := net.ParseIP("104.18.4.130")
+	v6 := net.ParseIP("2606:4700:4700::1111")
+
+	if _, err := sniffFilter(v4, false); err != nil {
+		t.Fatalf("v4: %v", err)
+	}
+	if _, err := sniffFilter(v6, true); err != nil {
+		t.Fatalf("v6: %v", err)
+	}
+	// A v6 address with v6=false is a configuration error: it must return an
+	// error rather than dereference a nil To4().
+	if _, err := sniffFilter(v6, false); err == nil {
+		t.Fatal("v6 address with v6=false should be rejected")
+	}
+}
