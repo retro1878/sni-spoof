@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/binary"
+	"net"
 	"sync/atomic"
 	"unsafe"
 
@@ -49,8 +50,12 @@ var (
 //	  (ip[2:2] - ((ip[0]&0x0f)<<2) - ((tcp[12]&0xf0)>>2)) == 0
 //
 // Offsets are into the full Ethernet frame (14-byte L2 header included).
-func sniffFilter(connIP []byte) ([]unix.SockFilter, error) {
-	raw, err := bpf.Assemble(sniffFilterInsns(binary.BigEndian.Uint32(connIP)))
+func sniffFilter(connIP net.IP, v6 bool) ([]unix.SockFilter, error) {
+	insns := sniffFilterInsns(binary.BigEndian.Uint32(connIP.To4()))
+	if v6 {
+		insns = sniffFilterInsns6()
+	}
+	raw, err := bpf.Assemble(insns)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +94,36 @@ func sniffFilterInsns(conn uint32) []bpf.Instruction {
 	}
 }
 
+// sniffFilterInsns6 accepts IPv6 TCP segments that carry no payload.
+//
+// It deliberately does not compare addresses. A 128-bit match costs four
+// loads and jumps per address, and a mistake there drops the handshake
+// packets the tool depends on — a silent, total failure. Leaving the
+// address check to sniffLoop keeps the kernel program trivial while still
+// discarding every relayed data frame, which is where the load actually is.
+//
+// The IPv6 header is fixed at 40 bytes with no options here, so tcp[12]
+// sits at 14+40+12 = 66.
+func sniffFilterInsns6() []bpf.Instruction {
+	return []bpf.Instruction{
+		bpf.LoadAbsolute{Off: 12, Size: 2},                            // A = ethertype
+		bpf.JumpIf{Cond: bpf.JumpNotEqual, Val: 0x86DD, SkipTrue: 12}, // not IPv6 -> drop
+		bpf.LoadAbsolute{Off: 20, Size: 1},                            // A = next header
+		bpf.JumpIf{Cond: bpf.JumpNotEqual, Val: 6, SkipTrue: 10},      // not TCP -> drop
+		bpf.LoadAbsolute{Off: 18, Size: 2},                            // A = payload length
+		bpf.StoreScratch{Src: bpf.RegA, N: 0},                         // M[0] = A
+		bpf.LoadAbsolute{Off: 66, Size: 1},                            // A = tcp[12]
+		bpf.ALUOpConstant{Op: bpf.ALUOpAnd, Val: 0xf0},                //
+		bpf.ALUOpConstant{Op: bpf.ALUOpShiftRight, Val: 2},            // A = TCP header length
+		bpf.TAX{},                            // X = TCP header length
+		bpf.LoadScratch{Dst: bpf.RegA, N: 0}, // A = payload length
+		bpf.ALUOpX{Op: bpf.ALUOpSub},         // A = TCP payload length
+		bpf.JumpIf{Cond: bpf.JumpNotEqual, Val: 0, SkipTrue: 1}, // payload != 0 -> drop
+		bpf.RetConstant{Val: 262144},                            // accept (whole frame)
+		bpf.RetConstant{Val: 0},                                 // drop
+	}
+}
+
 func openRaw() error {
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ALL)))
 	if err != nil {
@@ -103,7 +138,7 @@ func openRaw() error {
 
 	// Attach the kernel-side filter before the ring exists so filtered-out
 	// frames never consume a ring slot or reach the single sniffLoop goroutine.
-	filter, err := sniffFilter(connectIP)
+	filter, err := sniffFilter(connectIP, isIPv6)
 	if err != nil {
 		unix.Close(fd)
 		return err

@@ -26,6 +26,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,6 +173,7 @@ var (
 	ifaceName string
 	ifaceIdx  int
 	rawFd     int
+	isIPv6    bool
 )
 
 // ---- Per-connection (by local ephemeral port) state ----
@@ -222,11 +224,26 @@ func tcpChecksum(iph, tcpAndPayload []byte) uint16 {
 	return fold(sum16(pseudo) + sum16(tcpAndPayload))
 }
 
+// tcpChecksum6 uses the IPv6 pseudo-header from RFC 8200 s8.1:
+// src(16) + dst(16) + upper-layer length(4) + zeros(3) + next header(1).
+func tcpChecksum6(ip6, tcpAndPayload []byte) uint16 {
+	pseudo := make([]byte, 40)
+	copy(pseudo[0:16], ip6[8:24])
+	copy(pseudo[16:32], ip6[24:40])
+	binary.BigEndian.PutUint32(pseudo[32:36], uint32(len(tcpAndPayload)))
+	pseudo[39] = 6 // TCP
+	return fold(sum16(pseudo) + sum16(tcpAndPayload))
+}
+
 // ---- Injection: build fake frame from captured 3rd ACK ----
 
 func buildFakeFrame(tpl []byte, isn uint32, fake []byte) []byte {
-	ipOff := 14
-	ihl := ipHdrLen(tpl[ipOff:])
+	const ipOff = 14
+	v6 := binary.BigEndian.Uint16(tpl[12:14]) == 0x86DD
+	ihl := 40
+	if !v6 {
+		ihl = ipHdrLen(tpl[ipOff:])
+	}
 	tcpOff := ipOff + ihl
 	tcpHL := int(tpl[tcpOff+12]>>4) * 4
 
@@ -235,18 +252,27 @@ func buildFakeFrame(tpl []byte, isn uint32, fake []byte) []byte {
 	out = append(out, hdrs...)
 	out = append(out, fake...)
 
-	binary.BigEndian.PutUint16(out[ipOff+2:ipOff+4], uint16(len(out)-ipOff))
-	id := binary.BigEndian.Uint16(out[ipOff+4 : ipOff+6])
-	binary.BigEndian.PutUint16(out[ipOff+4:ipOff+6], id+1)
-	out[ipOff+10], out[ipOff+11] = 0, 0
-	binary.BigEndian.PutUint16(out[ipOff+10:ipOff+12], ipChecksum(out[ipOff:ipOff+ihl]))
+	if v6 {
+		// Payload length covers the TCP header and data; IPv6 has no
+		// header checksum to rewrite.
+		binary.BigEndian.PutUint16(out[ipOff+4:ipOff+6], uint16(len(out)-tcpOff))
+	} else {
+		binary.BigEndian.PutUint16(out[ipOff+2:ipOff+4], uint16(len(out)-ipOff))
+		id := binary.BigEndian.Uint16(out[ipOff+4 : ipOff+6])
+		binary.BigEndian.PutUint16(out[ipOff+4:ipOff+6], id+1)
+		out[ipOff+10], out[ipOff+11] = 0, 0
+		binary.BigEndian.PutUint16(out[ipOff+10:ipOff+12], ipChecksum(out[ipOff:ipOff+ihl]))
+	}
 
 	out[tcpOff+13] |= 0x08 // PSH
 	seq := isn + 1 - uint32(len(fake))
 	binary.BigEndian.PutUint32(out[tcpOff+4:tcpOff+8], seq)
 	out[tcpOff+16], out[tcpOff+17] = 0, 0
-	binary.BigEndian.PutUint16(out[tcpOff+16:tcpOff+18],
-		tcpChecksum(out[ipOff:ipOff+ihl], out[tcpOff:]))
+	sum := tcpChecksum(out[ipOff:ipOff+ihl], out[tcpOff:])
+	if v6 {
+		sum = tcpChecksum6(out[ipOff:ipOff+ihl], out[tcpOff:])
+	}
+	binary.BigEndian.PutUint16(out[tcpOff+16:tcpOff+18], sum)
 	return out
 }
 
@@ -266,16 +292,34 @@ func sniffLoop() {
 			continue
 		}
 		pkt := buf[:n]
-		if binary.BigEndian.Uint16(pkt[12:14]) != 0x0800 {
-			continue
-		}
 		ip := pkt[14:]
-		if ip[0]>>4 != 4 || ip[9] != 6 {
+		var ihl int
+		var src, dst net.IP
+		switch binary.BigEndian.Uint16(pkt[12:14]) {
+		case 0x0800:
+			if len(ip) < 20 || ip[0]>>4 != 4 || ip[9] != 6 {
+				continue
+			}
+			ihl = ipHdrLen(ip)
+			if len(ip) < ihl+20 {
+				continue
+			}
+			src, dst = net.IP(ip[12:16]), net.IP(ip[16:20])
+		case 0x86DD:
+			// TCP directly after the fixed 40-byte header. Extension
+			// headers are not walked: they do not appear on the handshake
+			// control packets this tool acts on.
+			if len(ip) < 40 || ip[0]>>4 != 6 || ip[6] != 6 {
+				continue
+			}
+			ihl = 40
+			if len(ip) < ihl+20 {
+				continue
+			}
+			src, dst = net.IP(ip[8:24]), net.IP(ip[24:40])
+		default:
 			continue
 		}
-		ihl := ipHdrLen(ip)
-		src := net.IP(ip[12:16])
-		dst := net.IP(ip[16:20])
 		tcp := ip[ihl:]
 		flags := tcp[13]
 		dataOff := int(tcp[12]>>4) * 4
@@ -379,7 +423,7 @@ func handle(client net.Conn) {
 		LocalAddr: &net.TCPAddr{IP: localIP},
 		Timeout:   5 * time.Second,
 	}
-	server, err := d.Dial("tcp", fmt.Sprintf("%s:%d", cfg.ConnectIP, cfg.ConnectPort))
+	server, err := d.Dial("tcp", net.JoinHostPort(cfg.ConnectIP, strconv.Itoa(cfg.ConnectPort)))
 	if err != nil {
 		logErrorf("dial: %v", err)
 		return
@@ -434,18 +478,19 @@ func handle(client net.Conn) {
 // ---- Startup ----
 
 func getLocalIPAndIface(targetIP string) (net.IP, string, int) {
-	c, err := net.Dial("udp", targetIP+":53")
+	c, err := net.Dial("udp", net.JoinHostPort(targetIP, "53"))
 	if err != nil {
 		logFatalf("%v", err)
 	}
 	defer c.Close()
-	lip := c.LocalAddr().(*net.UDPAddr).IP.To4()
+	lip := c.LocalAddr().(*net.UDPAddr).IP
+	wantV6 := lip.To4() == nil
 	ifaces, _ := net.Interfaces()
 	for _, iface := range ifaces {
 		addrs, _ := iface.Addrs()
 		for _, a := range addrs {
 			ipn, ok := a.(*net.IPNet)
-			if ok && ipn.IP.To4() != nil && ipn.IP.Equal(lip) {
+			if ok && (ipn.IP.To4() == nil) == wantV6 && ipn.IP.Equal(lip) {
 				return lip, iface.Name, iface.Index
 			}
 		}
@@ -467,18 +512,20 @@ func main() {
 		logFatalf("%v", err)
 	}
 	logThreshold = parseLevel(cfg.LogLevel)
-	connectIP = net.ParseIP(cfg.ConnectIP).To4()
+	connectIP = net.ParseIP(cfg.ConnectIP)
 	if connectIP == nil {
 		logFatalf("bad CONNECT_IP: %s", cfg.ConnectIP)
 	}
+	isIPv6 = connectIP.To4() == nil
 	localIP, ifaceName, ifaceIdx = getLocalIPAndIface(cfg.ConnectIP)
 
 	if err := openRaw(); err != nil {
 		logFatalf("open raw socket: %v", err)
 	}
 
-	logInfof("iface=%s ifindex=%d local=%s remote=%s:%d listen=%s:%d fake_sni=%s",
-		ifaceName, ifaceIdx, localIP, cfg.ConnectIP, cfg.ConnectPort,
+	logInfof("iface=%s ifindex=%d local=%s remote=%s listen=%s:%d fake_sni=%s",
+		ifaceName, ifaceIdx, localIP,
+		net.JoinHostPort(cfg.ConnectIP, strconv.Itoa(cfg.ConnectPort)),
 		cfg.ListenHost, cfg.ListenPort, cfg.FakeSNI)
 
 	go sniffLoop()

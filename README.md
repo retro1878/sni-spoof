@@ -38,7 +38,14 @@ go build -buildvcs=false -o sni-spoof .
 sudo ./sni-spoof config.json
 ```
 
-Works on Linux and macOS (amd64 / arm64). On macOS you may need to allow the binary to open `/dev/bpf*` — running under `sudo` is the simplest option.
+Works on Linux and macOS (amd64 / arm64).
+
+`CONNECT_IP` accepts an IPv4 or IPv6 address. Each instance talks to one
+upstream, so the family of `CONNECT_IP` selects the family end to end: point
+it at a v4 address and the forwarder captures and injects v4 frames, at a v6
+address and it does the same over v6. An IPv6 upstream needs actual IPv6
+connectivity from the host. IPv6 packets carrying extension headers are
+ignored. On macOS you may need to allow the binary to open `/dev/bpf*` — running under `sudo` is the simplest option.
 
 `config.json`:
 ```json
