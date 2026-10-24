@@ -14,7 +14,7 @@ err()  { echo -e "${RED}[!]${NC} $1" >&2; exit 1; }
 # ── Settings you may want to edit ───────────────────────────
 # When you cut a new release, update DL_URL's tag and EXPECTED_SHA256
 # together; scripts/release.sh does this for you.
-DL_URL="https://github.com/retro1878/sni-spoof/releases/download/v0.6.0/sni-spoof-linux-amd64"
+DL_URL="https://github.com/retro1878/sni-spoof/releases/download/v0.7.0/sni-spoof-linux-amd64"
 BIN_PATH="/usr/local/bin/sni-spoof"
 CFG_DIR="/etc/sni-spoof"
 CFG_V4="${CFG_DIR}/config.json"
